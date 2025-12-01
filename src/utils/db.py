@@ -54,77 +54,102 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
     
-    # Projects table to track uploads
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS projects (
-            id SERIAL PRIMARY KEY,
-            category TEXT NOT NULL,
-            s3_url TEXT NOT NULL,
-            uploaded_at TIMESTAMP DEFAULT now()
-        );
-        """
-    )
-    
-    # Milestone data table (dynamic columns)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS milestone_data (
-            id SERIAL PRIMARY KEY,
-            project_id INTEGER REFERENCES projects(id),
-            data JSONB NOT NULL,
-            created_at TIMESTAMP DEFAULT now()
-        );
-        """
-    )
-    
-    # Welcome kit data table (dynamic columns)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS welcome_kit_data (
-            id SERIAL PRIMARY KEY,
-            project_id INTEGER REFERENCES projects(id),
-            data JSONB NOT NULL,
-            created_at TIMESTAMP DEFAULT now()
-        );
-        """
-    )
-    
-    # Inventory data table (dynamic columns)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inventory_data (
-            id SERIAL PRIMARY KEY,
-            project_id INTEGER REFERENCES projects(id),
-            location TEXT,
-            workbook TEXT,
-            data JSONB NOT NULL,
-            updated_at TIMESTAMP DEFAULT now()
-        );
-        """
-    )
-    
-    # Create indexes for faster queries
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_milestone_data_project 
-        ON milestone_data(project_id);
+    try:
+        # STEP 1: Create projects table FIRST (it's referenced by other tables)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                id SERIAL PRIMARY KEY,
+                category TEXT NOT NULL,
+                s3_url TEXT NOT NULL,
+                uploaded_at TIMESTAMP DEFAULT now()
+            );
+            """
+        )
+        logger.info("✓ Projects table created/verified")
         
-        CREATE INDEX IF NOT EXISTS idx_welcome_kit_data_project 
-        ON welcome_kit_data(project_id);
+        # STEP 2: Create milestone_data table with foreign key
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS milestone_data (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                data JSONB NOT NULL,
+                created_at TIMESTAMP DEFAULT now()
+            );
+            """
+        )
+        logger.info("✓ Milestone_data table created/verified")
         
-        CREATE INDEX IF NOT EXISTS idx_inventory_data_location_workbook 
-        ON inventory_data(location, workbook);
+        # STEP 3: Create welcome_kit_data table with foreign key
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS welcome_kit_data (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                data JSONB NOT NULL,
+                created_at TIMESTAMP DEFAULT now()
+            );
+            """
+        )
+        logger.info("✓ Welcome_kit_data table created/verified")
         
-        CREATE INDEX IF NOT EXISTS idx_projects_category 
-        ON projects(category);
-        """
-    )
-    
-    conn.commit()
-    cur.close()
-    conn.close()
-    logger.info("✓ Database initialized successfully")
+        # STEP 4: Create inventory_data table with foreign key
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inventory_data (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                location TEXT,
+                workbook TEXT,
+                data JSONB NOT NULL,
+                updated_at TIMESTAMP DEFAULT now()
+            );
+            """
+        )
+        logger.info("✓ Inventory_data table created/verified")
+        
+        # STEP 5: Create indexes for faster queries
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_milestone_data_project 
+            ON milestone_data(project_id);
+            """
+        )
+        
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_welcome_kit_data_project 
+            ON welcome_kit_data(project_id);
+            """
+        )
+        
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_inventory_data_location_workbook 
+            ON inventory_data(location, workbook);
+            """
+        )
+        
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_projects_category 
+            ON projects(category);
+            """
+        )
+        
+        logger.info("✓ Indexes created/verified")
+        
+        conn.commit()
+        logger.info("✓ Database initialized successfully")
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"✗ Database initialization failed: {e}")
+        raise
+    finally:
+        cur.close()
+        conn.close()
 
 
 def save_category_data(category: str, s3_url: str, headers: list, data: list):
