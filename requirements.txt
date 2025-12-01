@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+boto3
+pandas
+psycopg2-binary
+pyyaml
+python-multipart
+openpyxl
+python-dotenv
+litellm
+botocore
+uvicorn[standard]
+python-dateutil
+pydantic[email]
