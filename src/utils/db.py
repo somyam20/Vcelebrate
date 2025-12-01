@@ -55,7 +55,7 @@ def init_db():
     cur = conn.cursor()
     
     try:
-        # STEP 1: Create projects table FIRST (it's referenced by other tables)
+        # Projects table to track uploads (must be created first)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -66,50 +66,52 @@ def init_db():
             );
             """
         )
-        logger.info("✓ Projects table created/verified")
         
-        # STEP 2: Create milestone_data table with foreign key
+        # Milestone data table (dynamic columns)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS milestone_data (
                 id SERIAL PRIMARY KEY,
-                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                project_id INTEGER,
                 data JSONB NOT NULL,
-                created_at TIMESTAMP DEFAULT now()
+                created_at TIMESTAMP DEFAULT now(),
+                CONSTRAINT fk_milestone_project FOREIGN KEY (project_id) 
+                    REFERENCES projects(id) ON DELETE CASCADE
             );
             """
         )
-        logger.info("✓ Milestone_data table created/verified")
         
-        # STEP 3: Create welcome_kit_data table with foreign key
+        # Welcome kit data table (dynamic columns)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS welcome_kit_data (
                 id SERIAL PRIMARY KEY,
-                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                project_id INTEGER,
                 data JSONB NOT NULL,
-                created_at TIMESTAMP DEFAULT now()
+                created_at TIMESTAMP DEFAULT now(),
+                CONSTRAINT fk_welcome_kit_project FOREIGN KEY (project_id) 
+                    REFERENCES projects(id) ON DELETE CASCADE
             );
             """
         )
-        logger.info("✓ Welcome_kit_data table created/verified")
         
-        # STEP 4: Create inventory_data table with foreign key
+        # Inventory data table (dynamic columns)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS inventory_data (
                 id SERIAL PRIMARY KEY,
-                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                project_id INTEGER,
                 location TEXT,
                 workbook TEXT,
                 data JSONB NOT NULL,
-                updated_at TIMESTAMP DEFAULT now()
+                updated_at TIMESTAMP DEFAULT now(),
+                CONSTRAINT fk_inventory_project FOREIGN KEY (project_id) 
+                    REFERENCES projects(id) ON DELETE CASCADE
             );
             """
         )
-        logger.info("✓ Inventory_data table created/verified")
         
-        # STEP 5: Create indexes for faster queries
+        # Create indexes for faster queries
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_milestone_data_project 
@@ -138,8 +140,6 @@ def init_db():
             """
         )
         
-        logger.info("✓ Indexes created/verified")
-        
         conn.commit()
         logger.info("✓ Database initialized successfully")
         
@@ -165,38 +165,78 @@ def save_category_data(category: str, s3_url: str, headers: list, data: list):
         )
         project_id = cur.fetchone()[0]
         
+        # Helper function to clean values for JSON serialization
+        def clean_value(val):
+            """Clean value for JSON serialization"""
+            if val is None:
+                return None
+            if isinstance(val, float):
+                # Check for NaN, inf, -inf
+                import math
+                if math.isnan(val) or math.isinf(val):
+                    return None
+            if isinstance(val, str):
+                # Clean string values
+                val = val.strip()
+                if val.lower() in ['nan', 'nat', 'none', '']:
+                    return None
+            return val
+        
         # Save data based on category
         if category == "milestone":
             for row in data:
-                row_data = dict(zip(headers, row))
+                # Create dict and clean values
+                row_data = {}
+                for header, value in zip(headers, row):
+                    cleaned_value = clean_value(value)
+                    row_data[header] = cleaned_value
+                
                 cur.execute(
                     "INSERT INTO milestone_data (project_id, data) VALUES (%s, %s)",
-                    (project_id, json.dumps(row_data))
+                    (project_id, json.dumps(row_data, default=str))
                 )
                 
         elif category == "welcome_kit":
             for row in data:
-                row_data = dict(zip(headers, row))
+                row_data = {}
+                for header, value in zip(headers, row):
+                    cleaned_value = clean_value(value)
+                    row_data[header] = cleaned_value
+                
                 cur.execute(
                     "INSERT INTO welcome_kit_data (project_id, data) VALUES (%s, %s)",
-                    (project_id, json.dumps(row_data))
+                    (project_id, json.dumps(row_data, default=str))
                 )
                 
         elif category == "inventory":
             for row in data:
-                row_data = dict(zip(headers, row))
-                # Extract location and workbook for indexing
-                location = row_data.get("Location", "Unknown")
-                # Assuming first column after location contains workbook info
-                workbook = list(row_data.keys())[1] if len(row_data) > 1 else "Unknown"
+                row_data = {}
+                for header, value in zip(headers, row):
+                    cleaned_value = clean_value(value)
+                    row_data[header] = cleaned_value
+                
+                # Extract location for indexing (first column or "Location" column)
+                location = None
+                for header, value in zip(headers, row):
+                    if "location" in header.lower():
+                        location = clean_value(value)
+                        break
+                if not location:
+                    location = clean_value(row[0]) if row else "Unknown"
+                
+                # Extract workbook (assuming it's in the data structure)
+                workbook = "Unknown"
+                for header in headers[1:]:  # Skip first column
+                    if header and header not in ["Location", "location"]:
+                        workbook = header
+                        break
                 
                 cur.execute(
                     """
                     INSERT INTO inventory_data (project_id, location, workbook, data) 
                     VALUES (%s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
                     """,
-                    (project_id, location, workbook, json.dumps(row_data))
+                    (project_id, location, workbook, json.dumps(row_data, default=str))
                 )
         
         conn.commit()

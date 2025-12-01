@@ -65,11 +65,18 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
         headers = [str(col).strip() for col in df.columns]
         logger.info(f"✓ Extracted {len(headers)} headers: {headers}")
         
+        # Replace NaN, NaT, and inf values with None (null in JSON)
+        df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
+        
+        # Also replace numpy NaN values
+        import numpy as np
+        df = df.replace([np.nan, np.inf, -np.inf], None)
+        
         # Convert dataframe to list of lists (rows)
         data = df.values.tolist()
         
-        # Clean data - remove empty rows
-        data = [row for row in data if any(pd.notna(val) and str(val).strip() for val in row)]
+        # Clean data - remove completely empty rows
+        data = [row for row in data if any(val is not None and str(val).strip() for val in row if val is not None)]
         
         logger.info(f"✓ Parsed {len(data)} rows of data")
         logger.info(f"✓ Sample row 0: {data[0] if data else 'No data'}")
