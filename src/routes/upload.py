@@ -22,6 +22,8 @@ async def upload_file(
     Upload S3 URL with category name, extract data dynamically and save to DB.
     
     Categories: milestone, welcome_kit, inventory
+    
+    For inventory files, multiple worksheets will be processed automatically.
     """
     logger.info("=" * 80)
     logger.info("UPLOAD REQUEST START")
@@ -73,26 +75,70 @@ async def upload_file(
             category
         )
         
-        headers = parsed_data["headers"]
-        data = parsed_data["data"]
-        
-        logger.info(f"✓ Extracted {len(headers)} headers")
-        logger.info(f"✓ Parsed {len(data)} rows")
-        
         # Step 3: Save to database
         logger.info("STEP 3: Saving to database...")
-        await async_save_category_data(category, s3_url, headers, data)
-        logger.info(f"✓ Saved {len(data)} rows to {category} table")
+        
+        total_rows = 0
+        
+        # Check if this is an inventory file with multiple sheets
+        if category == "inventory" and "sheets" in parsed_data:
+            logger.info(f"→ Processing {len(parsed_data['sheets'])} inventory worksheets...")
+            
+            for sheet in parsed_data['sheets']:
+                workbook = sheet['workbook']
+                headers = sheet['headers']
+                data = sheet['data']
+                
+                # Extract quarter from data if present
+                quarter = None
+                for row in data:
+                    if len(row) > 0 and row[0]:
+                        # Check if first column contains quarter info
+                        first_val = str(row[0])
+                        if any(q in first_val for q in ["Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar"]):
+                            quarter = first_val
+                            break
+                
+                logger.info(f"  → Saving workbook '{workbook}' (quarter: {quarter}), {len(data)} rows...")
+                
+                await async_save_category_data(
+                    category=category,
+                    s3_url=s3_url,
+                    headers=headers,
+                    data=data,
+                    workbook=workbook,
+                    quarter=quarter
+                )
+                
+                total_rows += len(data)
+                logger.info(f"  ✓ Saved {len(data)} rows for workbook '{workbook}'")
+            
+            response = {
+                "message": "uploaded successfully",
+                "category": category,
+                "s3_url": s3_url,
+                "workbooks_processed": len(parsed_data['sheets']),
+                "total_rows_processed": total_rows,
+                "workbooks": [sheet['workbook'] for sheet in parsed_data['sheets']]
+            }
+        else:
+            # Single data file (milestone or welcome_kit)
+            headers = parsed_data["headers"]
+            data = parsed_data["data"]
+            
+            await async_save_category_data(category, s3_url, headers, data)
+            total_rows = len(data)
+            logger.info(f"✓ Saved {total_rows} rows to {category} table")
+            
+            response = {
+                "message": "uploaded successfully",
+                "category": category,
+                "s3_url": s3_url,
+                "rows_processed": total_rows,
+                "headers": headers
+            }
         
         # Step 4: If this is milestone or inventory upload, trigger inventory updates
-        response = {
-            "message": "uploaded successfully",
-            "category": category,
-            "s3_url": s3_url,
-            "rows_processed": len(data),
-            "headers": headers
-        }
-        
         if category in ["milestone", "inventory"]:
             logger.info("STEP 4: Triggering inventory updates...")
             update_result = await check_and_update_inventory()
