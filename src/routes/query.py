@@ -1,7 +1,6 @@
 import asyncio
 import json
-from fastapi import APIRouter, HTTPException, Form
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Form, Request
 from src.utils.db import async_get_category_data
 from config.config import get_model_config
 from config.settings import CATEGORIES
@@ -13,38 +12,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-class QueryRequest(BaseModel):
-    category: str
-    query: str
-
-
 @router.post("/query")
 async def query_data(
-    req: QueryRequest,
-    user_metadata: str | None = Form(None)
+    req: Request,
+    category: str = Form(...),
+    query: str = Form(...),
+    user_metadata: str = Form(...)
 ):
     """
     Query category-wise data using LLM.
     
     Categories: milestone, welcome_kit, inventory
+    
+    Usage with curl:
+    curl -X POST "http://localhost:8000/api/query" \
+         -H "Authorization: Bearer token" \
+         -F "category=inventory" \
+         -F "query=how many birthday gifts are available?" \
+         -F "user_metadata={\"team_id\":\"team123\"}"
     """
     logger.info("=" * 80)
     logger.info("QUERY REQUEST START")
-    logger.info(f"Category: {req.category}")
-    logger.info(f"Query: {req.query}")
+    logger.info(f"Category: {category}")
+    logger.info(f"Query: {query}")
     logger.info("=" * 80)
     
     # Validate category
-    if req.category not in CATEGORIES:
-        logger.error(f"Invalid category: {req.category}")
+    if category not in CATEGORIES:
+        logger.error(f"Invalid category: {category}")
         raise HTTPException(
             status_code=400,
             detail=f"Invalid category. Must be one of: {', '.join(CATEGORIES)}"
         )
     
-    # Get user metadata and team configuration
-    user_metadata = json.loads(user_metadata) if user_metadata else {}
-    team_id = user_metadata.get("team_id")
+    # Parse user metadata
+    user_metadata_dict = json.loads(user_metadata) if user_metadata else {}
+    team_id = user_metadata_dict.get("team_id")
     
     if not team_id:
         logger.error("Missing team_id in user_metadata")
@@ -62,6 +65,17 @@ async def query_data(
             provider_model = f"{provider}/{model}"
             model_config = team_config["config"]
             
+            # Create LLM params
+            llm_params = {
+                "model": provider_model,
+                **model_config
+            }
+            
+            # Get auth token from headers
+            auth_token = req.headers.get("Authorization")
+            if auth_token:
+                llm_params.update({"auth_token": auth_token})
+            
             logger.info(f"✓ Using model: {provider_model}")
             
     except Exception as e:
@@ -73,14 +87,14 @@ async def query_data(
     
     try:
         # Step 1: Retrieve category data from database
-        logger.info(f"STEP 1: Retrieving {req.category} data from database...")
-        category_data = await async_get_category_data(req.category)
+        logger.info(f"STEP 1: Retrieving {category} data from database...")
+        category_data = await async_get_category_data(category)
         
         if not category_data:
-            logger.warning(f"⚠ No data found for category: {req.category}")
+            logger.warning(f"⚠ No data found for category: {category}")
             raise HTTPException(
                 status_code=404,
-                detail=f"No data found for category: {req.category}"
+                detail=f"No data found for category: {category}"
             )
         
         logger.info(f"✓ Retrieved {len(category_data)} records")
@@ -91,7 +105,7 @@ async def query_data(
         # Convert data to a readable format
         formatted_data = []
         for idx, record in enumerate(category_data[:100]):  # Limit to first 100 records
-            if req.category == "inventory":
+            if category == "inventory":
                 formatted_data.append({
                     "location": record.get("location"),
                     "workbook": record.get("workbook"),
@@ -103,18 +117,18 @@ async def query_data(
                 )
         
         data_text = json.dumps(formatted_data, indent=2, default=str)
-        logger.info(f"✓ Formatted {len(formatted_data)} records")
+        logger.info(f"✓ Formatted {len(formatted_data)} records ({len(data_text)} characters)")
         
         # Step 3: Build LLM prompt
         logger.info("STEP 3: Building LLM prompt...")
         
-        prompt = f"""You are an expert data analyst. Analyze the following {req.category} data and answer the user's question.
+        prompt = f"""You are an expert data analyst. Analyze the following {category} data and answer the user's question.
 
 DATA:
 {data_text}
 
 USER QUESTION:
-{req.query}
+{query}
 
 Provide a clear, detailed answer based on the data above. If you need to perform calculations or aggregations, do so accurately. Format your response in a professional, easy-to-read manner."""
 
@@ -126,14 +140,30 @@ Provide a clear, detailed answer based on the data above. If you need to perform
         messages = [{"role": "user", "content": prompt}]
         
         try:
-            response = await litellm.acompletion(
-                model=provider_model,
-                messages=messages,
-                **model_config
+            # Remove auth_token from llm_params before passing to litellm
+            auth_token = llm_params.pop("auth_token", "")
+            
+            # Call LLM
+            response = litellm.completion(
+                **llm_params,
+                messages=messages
             )
             
-            llm_response = response.choices[0].message.content
+            # Extract response
+            llm_response = response.choices[0].message.content.strip()
             logger.info(f"✓ LLM responded ({len(llm_response)} characters)")
+            
+            # Track token usage (if you have tracker)
+            try:
+                from src.utils.obs import LLMUsageTracker
+                token_tracker = LLMUsageTracker()
+                token_tracker.track_response(
+                    response=response, 
+                    auth_token=auth_token, 
+                    model=llm_params.get("model", "")
+                )
+            except Exception as track_error:
+                logger.warning(f"Failed to track token usage: {track_error}")
             
         except Exception as e:
             logger.exception(f"✗ LLM call failed: {e}")
@@ -147,8 +177,8 @@ Provide a clear, detailed answer based on the data above. If you need to perform
         logger.info("=" * 80)
         
         return {
-            "category": req.category,
-            "query": req.query,
+            "category": category,
+            "query": query,
             "answer": llm_response,
             "records_analyzed": len(formatted_data)
         }

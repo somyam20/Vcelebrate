@@ -13,9 +13,6 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Lite LLM / model configuration
-LITE_LLM_API_KEY = os.getenv("LITE_LLM_API_KEY")
-LITE_LLM_MODEL = os.getenv("LITE_LLM_MODEL", "gemini/gemini-2.5-flash-lite")
 
 # Upload settings
 S3_UPLOAD_PREFIX = os.getenv("S3_UPLOAD_PREFIX", "projects/")
