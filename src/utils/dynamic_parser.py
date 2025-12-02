@@ -20,18 +20,33 @@ async def async_parse_excel_dynamic(file_obj, filename: str, category: str, s3_u
             excel_file = pd.ExcelFile(file_obj)
             sheet_names = excel_file.sheet_names
             
-            # Check if this contains the special "As On 03-10-25" sheet
-            special_sheet = None
-            for sheet_name in sheet_names:
-                if "as on" in sheet_name.lower() and "03-10-25" in sheet_name:
-                    special_sheet = sheet_name
-                    break
+            # Check for special sheets
+            special_anniversary_sheet = None
+            service_completion_sheet = None
             
-            if special_sheet:
-                logger.info(f"Found special anniversary/birthday sheet: {special_sheet}")
-                # Use the async version with database saving
-                result = await parse_anniversary_birthday_sheet(file_obj, special_sheet, "As on 03-10-25", s3_url)
-                return {"sheets": result}
+            for sheet_name in sheet_names:
+                if "as on" in sheet_name.lower() and ("03-10-25" in sheet_name or "30-09" in sheet_name or "30.09" in sheet_name):
+                    special_anniversary_sheet = sheet_name
+                elif "service completion" in sheet_name.lower():
+                    service_completion_sheet = sheet_name
+            
+            result_sheets = []
+            
+            # Process anniversary/birthday sheet
+            if special_anniversary_sheet:
+                logger.info(f"Found special anniversary/birthday sheet: {special_anniversary_sheet}")
+                anniversary_result = await parse_anniversary_birthday_sheet(file_obj, special_anniversary_sheet, "As on 03-10-25", s3_url)
+                result_sheets.extend(anniversary_result)
+            
+            # Process service completion sheet
+            if service_completion_sheet:
+                logger.info(f"Found service completion sheet: {service_completion_sheet}")
+                service_result = await parse_service_completion_sheet(file_obj, service_completion_sheet, "Service Completion", s3_url)
+                result_sheets.append(service_result)
+            
+            if result_sheets:
+                return {"sheets": result_sheets}
+                
         except Exception as e:
             logger.warning(f"Failed special processing, falling back to standard: {e}")
     
@@ -132,11 +147,11 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
 def parse_inventory_workbook(file_obj, filename: str):
     """
     Parse inventory Excel file with multiple worksheets.
-    For "As On 03-10-25" workbook, extract specific rows for birthday and anniversary gifts.
     
     Special handling:
-    - Row 5 (index 4): Birthday gifts quantities by location
-    - Row 8 (index 7): Anniversary gifts quantities by location
+    - "As On 03-10-25" workbook: Extract rows 5 (birthday) and 8 (anniversary) with location columns
+    - "Service Completion" workbook: Extract Quarter, Location, and Quantity Received columns
+    - Other workbooks: Standard extraction
     """
     logger.info("=" * 80)
     logger.info("PARSING INVENTORY WORKBOOK WITH MULTIPLE SHEETS")
@@ -187,13 +202,18 @@ def parse_inventory_workbook(file_obj, filename: str):
             # Special handling for "As On 03-10-25" workbook
             if matched_name == "As on 03-10-25":
                 logger.info(f"  ★ Special processing for Anniversary/Birthday gifts workbook")
-                # Note: This is called from sync context, so we can't use async here
-                # The async version should be called from the main parsing function
                 result = parse_anniversary_birthday_sheet_sync(file_obj, sheet_name, matched_name)
                 all_sheets_data.extend(result)
                 continue
             
-            # Standard processing for other sheets
+            # Special handling for "Service Completion" workbook
+            if matched_name == "Service Completion":
+                logger.info(f"  ★ Special processing for Service Completion workbook")
+                result = parse_service_completion_sheet_sync(file_obj, sheet_name, matched_name)
+                all_sheets_data.append(result)
+                continue
+            
+            # Standard processing for other sheets (Birthday, etc.)
             df = None
             for header_row in [0, 1, 2]:
                 try:
@@ -288,9 +308,8 @@ async def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_na
     Extracts birthday gifts from row 5 and anniversary gifts from row 8.
     Maps locations using LOCATION_ALIASES and saves to database.
     
-    Returns a list with two sheet data objects:
-    1. Birthday gifts data
-    2. Anniversary gifts data
+    FIXED: Now correctly reads location names from the actual column headers
+    instead of treating them as data rows.
     """
     logger.info(f"    ★★★ SPECIAL ROW-BASED EXTRACTION WITH LOCATION MAPPING ★★★")
     logger.info(f"    Birthday gifts row: {BIRTHDAY_GIFTS_ROW} (index {BIRTHDAY_GIFTS_ROW-1})")
@@ -298,37 +317,54 @@ async def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_na
     
     try:
         file_obj.seek(0)
-        # Read without header to get raw data
-        df_raw = pd.read_excel(file_obj, sheet_name=sheet_name, header=None)
+        # Read the sheet with the FIRST row as headers (row 0)
+        # This will give us the actual location names as column headers
+        df = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
         
-        logger.info(f"    Raw sheet dimensions: {df_raw.shape[0]} rows × {df_raw.shape[1]} columns")
+        logger.info(f"    Sheet dimensions: {df.shape[0]} rows × {df.shape[1]} columns")
         
-        # Read with header to get column names
-        file_obj.seek(0)
-        df_header = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
-        headers = [str(col).strip() for col in df_header.columns]
+        # Get the column names (these are the location names)
+        location_headers = [str(col).strip() for col in df.columns]
+        logger.info(f"    Location headers (columns): {location_headers}")
         
-        logger.info(f"    Headers: {headers}")
+        # Filter out columns that start with "Unnamed" or are "Description" or "Event"
+        valid_locations = []
+        valid_indices = []
+        for idx, header in enumerate(location_headers):
+            if not header.startswith("Unnamed") and header not in ["Description", "Event"]:
+                valid_locations.append(header)
+                valid_indices.append(idx)
+        
+        logger.info(f"    Valid location columns: {valid_locations}")
         
         result_sheets = []
         
-        # Extract Birthday gifts (row 5, index 4)
-        if len(df_raw) >= BIRTHDAY_GIFTS_ROW:
-            birthday_row = df_raw.iloc[BIRTHDAY_GIFTS_ROW - 1].tolist()
-            logger.info(f"    ✓ Extracted Birthday row {BIRTHDAY_GIFTS_ROW}: {birthday_row[:5]}...")
+        # Extract Birthday gifts (row 5, but in DataFrame it's index 4 since we used header=0)
+        # The actual row 5 in Excel becomes index 4 in the DataFrame (0-indexed after header)
+        birthday_df_index = BIRTHDAY_GIFTS_ROW - 1 - 1  # -1 for 1-based to 0-based, -1 for header row
+        
+        if len(df) > birthday_df_index:
+            logger.info(f"    Extracting Birthday row at DataFrame index {birthday_df_index}")
             
-            # Map locations and create structured data
             mapped_birthday_data = []
-            for i, (header, value) in enumerate(zip(headers, birthday_row)):
-                if value is not None and str(value).strip() and not pd.isna(value):
-                    normalized_location = normalize_location(header)
-                    mapped_birthday_data.append({
-                        "original_location": header,
-                        "normalized_location": normalized_location,
-                        "quantity": value,
-                        "gift_type": "Birthday"
-                    })
-                    logger.info(f"      Location mapping: '{header}' → '{normalized_location}' (qty: {value})")
+            for idx, location in zip(valid_indices, valid_locations):
+                quantity = df.iloc[birthday_df_index, idx]
+                
+                # Skip if quantity is None, NaN, or empty
+                if quantity is not None and not pd.isna(quantity) and str(quantity).strip():
+                    try:
+                        quantity_int = int(float(quantity))
+                        if quantity_int > 0:  # Only include non-zero quantities
+                            normalized_location = normalize_location(location)
+                            mapped_birthday_data.append({
+                                "original_location": location,
+                                "normalized_location": normalized_location,
+                                "quantity": quantity_int,
+                                "gift_type": "Birthday"
+                            })
+                            logger.info(f"      Location mapping: '{location}' → '{normalized_location}' (qty: {quantity_int})")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"      Skipping invalid quantity for {location}: {quantity}")
             
             # Save to database if s3_url provided
             if s3_url and mapped_birthday_data:
@@ -340,35 +376,43 @@ async def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_na
             
             result_sheets.append({
                 "workbook": "Birthday",
-                "headers": headers,
-                "data": [birthday_row],
+                "headers": valid_locations,
+                "data": [[df.iloc[birthday_df_index, idx] for idx in valid_indices]],
                 "mapped_data": mapped_birthday_data,
                 "row_count": 1,
-                "column_count": len(headers),
+                "column_count": len(valid_locations),
                 "quarter": None,
                 "special_row": BIRTHDAY_GIFTS_ROW
             })
             logger.info(f"    ✓ Created Birthday gifts dataset with {len(mapped_birthday_data)} location mappings")
         else:
-            logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Birthday row {BIRTHDAY_GIFTS_ROW}")
+            logger.warning(f"    ⚠ Sheet has only {len(df)} rows, cannot extract Birthday row {BIRTHDAY_GIFTS_ROW}")
         
-        # Extract Anniversary gifts (row 8, index 7)
-        if len(df_raw) >= ANNIVERSARY_GIFTS_ROW:
-            anniversary_row = df_raw.iloc[ANNIVERSARY_GIFTS_ROW - 1].tolist()
-            logger.info(f"    ✓ Extracted Anniversary row {ANNIVERSARY_GIFTS_ROW}: {anniversary_row[:5]}...")
+        # Extract Anniversary gifts (row 8, DataFrame index 6)
+        anniversary_df_index = ANNIVERSARY_GIFTS_ROW - 1 - 1
+        
+        if len(df) > anniversary_df_index:
+            logger.info(f"    Extracting Anniversary row at DataFrame index {anniversary_df_index}")
             
-            # Map locations and create structured data
             mapped_anniversary_data = []
-            for i, (header, value) in enumerate(zip(headers, anniversary_row)):
-                if value is not None and str(value).strip() and not pd.isna(value):
-                    normalized_location = normalize_location(header)
-                    mapped_anniversary_data.append({
-                        "original_location": header,
-                        "normalized_location": normalized_location,
-                        "quantity": value,
-                        "gift_type": "Anniversary"
-                    })
-                    logger.info(f"      Location mapping: '{header}' → '{normalized_location}' (qty: {value})")
+            for idx, location in zip(valid_indices, valid_locations):
+                quantity = df.iloc[anniversary_df_index, idx]
+                
+                # Skip if quantity is None, NaN, or empty
+                if quantity is not None and not pd.isna(quantity) and str(quantity).strip():
+                    try:
+                        quantity_int = int(float(quantity))
+                        if quantity_int > 0:  # Only include non-zero quantities
+                            normalized_location = normalize_location(location)
+                            mapped_anniversary_data.append({
+                                "original_location": location,
+                                "normalized_location": normalized_location,
+                                "quantity": quantity_int,
+                                "gift_type": "Anniversary"
+                            })
+                            logger.info(f"      Location mapping: '{location}' → '{normalized_location}' (qty: {quantity_int})")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"      Skipping invalid quantity for {location}: {quantity}")
             
             # Save to database if s3_url provided
             if s3_url and mapped_anniversary_data:
@@ -380,17 +424,17 @@ async def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_na
             
             result_sheets.append({
                 "workbook": "As on 03-10-25",
-                "headers": headers,
-                "data": [anniversary_row],
+                "headers": valid_locations,
+                "data": [[df.iloc[anniversary_df_index, idx] for idx in valid_indices]],
                 "mapped_data": mapped_anniversary_data,
                 "row_count": 1,
-                "column_count": len(headers),
+                "column_count": len(valid_locations),
                 "quarter": None,
                 "special_row": ANNIVERSARY_GIFTS_ROW
             })
             logger.info(f"    ✓ Created Anniversary gifts dataset with {len(mapped_anniversary_data)} location mappings")
         else:
-            logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Anniversary row {ANNIVERSARY_GIFTS_ROW}")
+            logger.warning(f"    ⚠ Sheet has only {len(df)} rows, cannot extract Anniversary row {ANNIVERSARY_GIFTS_ROW}")
         
         logger.info(f"    ★★★ SPECIAL EXTRACTION COMPLETE: {len(result_sheets)} datasets created ★★★")
         return result_sheets
@@ -404,6 +448,8 @@ def parse_anniversary_birthday_sheet_sync(file_obj, sheet_name: str, matched_nam
     """
     Synchronous version of parse_anniversary_birthday_sheet for use in sync contexts.
     This version doesn't save to database - just extracts and maps the data.
+    
+    FIXED: Now correctly reads location names from the actual column headers.
     """
     logger.info(f"    ★★★ SYNC SPECIAL ROW-BASED EXTRACTION WITH LOCATION MAPPING ★★★")
     logger.info(f"    Birthday gifts row: {BIRTHDAY_GIFTS_ROW} (index {BIRTHDAY_GIFTS_ROW-1})")
@@ -411,87 +457,362 @@ def parse_anniversary_birthday_sheet_sync(file_obj, sheet_name: str, matched_nam
     
     try:
         file_obj.seek(0)
-        # Read without header to get raw data
-        df_raw = pd.read_excel(file_obj, sheet_name=sheet_name, header=None)
+        # Read the sheet with the FIRST row as headers (row 0)
+        df = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
         
-        logger.info(f"    Raw sheet dimensions: {df_raw.shape[0]} rows × {df_raw.shape[1]} columns")
+        logger.info(f"    Sheet dimensions: {df.shape[0]} rows × {df.shape[1]} columns")
         
-        # Read with header to get column names
-        file_obj.seek(0)
-        df_header = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
-        headers = [str(col).strip() for col in df_header.columns]
+        # Get the column names (these are the location names)
+        location_headers = [str(col).strip() for col in df.columns]
+        logger.info(f"    Location headers (columns): {location_headers}")
         
-        logger.info(f"    Headers: {headers}")
+        # Filter out columns that start with "Unnamed" or are "Description" or "Event"
+        valid_locations = []
+        valid_indices = []
+        for idx, header in enumerate(location_headers):
+            if not header.startswith("Unnamed") and header not in ["Description", "Event"]:
+                valid_locations.append(header)
+                valid_indices.append(idx)
+        
+        logger.info(f"    Valid location columns: {valid_locations}")
         
         result_sheets = []
         
-        # Extract Birthday gifts (row 5, index 4)
-        if len(df_raw) >= BIRTHDAY_GIFTS_ROW:
-            birthday_row = df_raw.iloc[BIRTHDAY_GIFTS_ROW - 1].tolist()
-            logger.info(f"    ✓ Extracted Birthday row {BIRTHDAY_GIFTS_ROW}: {birthday_row[:5]}...")
+        # Extract Birthday gifts
+        birthday_df_index = BIRTHDAY_GIFTS_ROW - 1 - 1
+        
+        if len(df) > birthday_df_index:
+            logger.info(f"    Extracting Birthday row at DataFrame index {birthday_df_index}")
             
-            # Map locations and create structured data
             mapped_birthday_data = []
-            for i, (header, value) in enumerate(zip(headers, birthday_row)):
-                if value is not None and str(value).strip() and not pd.isna(value):
-                    normalized_location = normalize_location(header)
-                    mapped_birthday_data.append({
-                        "original_location": header,
-                        "normalized_location": normalized_location,
-                        "quantity": value,
-                        "gift_type": "Birthday"
-                    })
-                    logger.info(f"      Location mapping: '{header}' → '{normalized_location}' (qty: {value})")
+            for idx, location in zip(valid_indices, valid_locations):
+                quantity = df.iloc[birthday_df_index, idx]
+                
+                if quantity is not None and not pd.isna(quantity) and str(quantity).strip():
+                    try:
+                        quantity_int = int(float(quantity))
+                        if quantity_int > 0:
+                            normalized_location = normalize_location(location)
+                            mapped_birthday_data.append({
+                                "original_location": location,
+                                "normalized_location": normalized_location,
+                                "quantity": quantity_int,
+                                "gift_type": "Birthday"
+                            })
+                            logger.info(f"      Location mapping: '{location}' → '{normalized_location}' (qty: {quantity_int})")
+                    except (ValueError, TypeError):
+                        logger.warning(f"      Skipping invalid quantity for {location}: {quantity}")
             
             result_sheets.append({
                 "workbook": "Birthday",
-                "headers": headers,
-                "data": [birthday_row],
+                "headers": valid_locations,
+                "data": [[df.iloc[birthday_df_index, idx] for idx in valid_indices]],
                 "mapped_data": mapped_birthday_data,
                 "row_count": 1,
-                "column_count": len(headers),
+                "column_count": len(valid_locations),
                 "quarter": None,
                 "special_row": BIRTHDAY_GIFTS_ROW
             })
             logger.info(f"    ✓ Created Birthday gifts dataset with {len(mapped_birthday_data)} location mappings")
         else:
-            logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Birthday row {BIRTHDAY_GIFTS_ROW}")
+            logger.warning(f"    ⚠ Sheet has only {len(df)} rows, cannot extract Birthday row {BIRTHDAY_GIFTS_ROW}")
         
-        # Extract Anniversary gifts (row 8, index 7)
-        if len(df_raw) >= ANNIVERSARY_GIFTS_ROW:
-            anniversary_row = df_raw.iloc[ANNIVERSARY_GIFTS_ROW - 1].tolist()
-            logger.info(f"    ✓ Extracted Anniversary row {ANNIVERSARY_GIFTS_ROW}: {anniversary_row[:5]}...")
+        # Extract Anniversary gifts
+        anniversary_df_index = ANNIVERSARY_GIFTS_ROW - 1 - 1
+        
+        if len(df) > anniversary_df_index:
+            logger.info(f"    Extracting Anniversary row at DataFrame index {anniversary_df_index}")
             
-            # Map locations and create structured data
             mapped_anniversary_data = []
-            for i, (header, value) in enumerate(zip(headers, anniversary_row)):
-                if value is not None and str(value).strip() and not pd.isna(value):
-                    normalized_location = normalize_location(header)
-                    mapped_anniversary_data.append({
-                        "original_location": header,
-                        "normalized_location": normalized_location,
-                        "quantity": value,
-                        "gift_type": "Anniversary"
-                    })
-                    logger.info(f"      Location mapping: '{header}' → '{normalized_location}' (qty: {value})")
+            for idx, location in zip(valid_indices, valid_locations):
+                quantity = df.iloc[anniversary_df_index, idx]
+                
+                if quantity is not None and not pd.isna(quantity) and str(quantity).strip():
+                    try:
+                        quantity_int = int(float(quantity))
+                        if quantity_int > 0:
+                            normalized_location = normalize_location(location)
+                            mapped_anniversary_data.append({
+                                "original_location": location,
+                                "normalized_location": normalized_location,
+                                "quantity": quantity_int,
+                                "gift_type": "Anniversary"
+                            })
+                            logger.info(f"      Location mapping: '{location}' → '{normalized_location}' (qty: {quantity_int})")
+                    except (ValueError, TypeError):
+                        logger.warning(f"      Skipping invalid quantity for {location}: {quantity}")
             
             result_sheets.append({
                 "workbook": "As on 03-10-25",
-                "headers": headers,
-                "data": [anniversary_row],
+                "headers": valid_locations,
+                "data": [[df.iloc[anniversary_df_index, idx] for idx in valid_indices]],
                 "mapped_data": mapped_anniversary_data,
                 "row_count": 1,
-                "column_count": len(headers),
+                "column_count": len(valid_locations),
                 "quarter": None,
                 "special_row": ANNIVERSARY_GIFTS_ROW
             })
             logger.info(f"    ✓ Created Anniversary gifts dataset with {len(mapped_anniversary_data)} location mappings")
         else:
-            logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Anniversary row {ANNIVERSARY_GIFTS_ROW}")
+            logger.warning(f"    ⚠ Sheet has only {len(df)} rows, cannot extract Anniversary row {ANNIVERSARY_GIFTS_ROW}")
         
         logger.info(f"    ★★★ SYNC SPECIAL EXTRACTION COMPLETE: {len(result_sheets)} datasets created ★★★")
         return result_sheets
         
     except Exception as e:
         logger.exception(f"    ✗ Failed sync special row extraction: {e}")
+        raise
+
+
+def parse_service_completion_sheet_sync(file_obj, sheet_name: str, matched_name: str):
+    """
+    Parse Service Completion workbook.
+    Extracts Quarter, Location, and Quantity Received columns.
+    Groups data by quarter and normalizes location names.
+    """
+    logger.info(f"    ★★★ SERVICE COMPLETION WORKBOOK EXTRACTION ★★★")
+    
+    try:
+        file_obj.seek(0)
+        # Read the sheet with header row
+        df = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
+        
+        logger.info(f"    Sheet dimensions: {df.shape[0]} rows × {df.shape[1]} columns")
+        logger.info(f"    Columns: {list(df.columns)}")
+        
+        # Find the relevant columns (case-insensitive)
+        quarter_col = None
+        location_col = None
+        quantity_col = None
+        
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            if 'quarter' in col_lower:
+                quarter_col = col
+            elif 'location' in col_lower:
+                location_col = col
+            elif 'quantity' in col_lower and 'received' in col_lower:
+                quantity_col = col
+        
+        if not all([quarter_col, location_col, quantity_col]):
+            logger.error(f"    ✗ Missing required columns!")
+            logger.error(f"    Quarter column: {quarter_col}")
+            logger.error(f"    Location column: {location_col}")
+            logger.error(f"    Quantity Received column: {quantity_col}")
+            raise ValueError("Service Completion sheet missing required columns: Quarter, Location, or Quantity Received")
+        
+        logger.info(f"    ✓ Found required columns:")
+        logger.info(f"      Quarter: '{quarter_col}'")
+        logger.info(f"      Location: '{location_col}'")
+        logger.info(f"      Quantity Received: '{quantity_col}'")
+        
+        # Clean the data
+        import numpy as np
+        df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
+        df = df.replace([np.nan, np.inf, -np.inf], None)
+        
+        # Filter out rows with empty essential data
+        df_clean = df[
+            df[quarter_col].notna() & 
+            df[location_col].notna() & 
+            df[quantity_col].notna()
+        ].copy()
+        
+        logger.info(f"    ✓ Cleaned data: {len(df_clean)} valid rows (from {len(df)} total)")
+        
+        # Normalize locations and prepare structured data
+        mapped_data = []
+        for idx, row in df_clean.iterrows():
+            quarter = str(row[quarter_col]).strip()
+            original_location = str(row[location_col]).strip()
+            
+            try:
+                quantity_received = int(float(row[quantity_col]))
+            except (ValueError, TypeError):
+                logger.warning(f"      Skipping row {idx}: invalid quantity '{row[quantity_col]}'")
+                continue
+            
+            # Normalize location
+            normalized_location = normalize_location(original_location)
+            
+            mapped_data.append({
+                "quarter": quarter,
+                "original_location": original_location,
+                "normalized_location": normalized_location,
+                "quantity_received": quantity_received,
+                "gift_type": "Service Completion"
+            })
+            
+            logger.debug(f"      {quarter} | '{original_location}' → '{normalized_location}' | Qty: {quantity_received}")
+        
+        logger.info(f"    ✓ Processed {len(mapped_data)} service completion records")
+        
+        # Group by quarter for summary
+        quarters = {}
+        for record in mapped_data:
+            q = record['quarter']
+            if q not in quarters:
+                quarters[q] = 0
+            quarters[q] += record['quantity_received']
+        
+        logger.info(f"    Summary by quarter:")
+        for q, total in sorted(quarters.items()):
+            logger.info(f"      {q}: {total} total gifts")
+        
+        # Convert mapped_data to the format expected by the database
+        headers = ["quarter", "original_location", "normalized_location", "quantity_received", "gift_type"]
+        data_rows = [[
+            item["quarter"],
+            item["original_location"],
+            item["normalized_location"],
+            item["quantity_received"],
+            item["gift_type"]
+        ] for item in mapped_data]
+        
+        logger.info(f"    ★★★ SERVICE COMPLETION EXTRACTION COMPLETE ★★★")
+        
+        return {
+            "workbook": "Service Completion",
+            "headers": headers,
+            "data": data_rows,
+            "mapped_data": mapped_data,
+            "row_count": len(data_rows),
+            "column_count": len(headers),
+            "quarter": "Multiple",  # Since this workbook contains multiple quarters
+            "quarters_summary": quarters
+        }
+        
+    except Exception as e:
+        logger.exception(f"    ✗ Failed service completion extraction: {e}")
+        raise
+
+
+async def parse_service_completion_sheet(file_obj, sheet_name: str, matched_name: str, s3_url: str = None):
+    """
+    Async version of Service Completion parser with database saving.
+    Extracts Quarter, Location, and Quantity Received columns.
+    """
+    logger.info(f"    ★★★ ASYNC SERVICE COMPLETION WORKBOOK EXTRACTION ★★★")
+    
+    try:
+        file_obj.seek(0)
+        df = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
+        
+        logger.info(f"    Sheet dimensions: {df.shape[0]} rows × {df.shape[1]} columns")
+        logger.info(f"    Columns: {list(df.columns)}")
+        
+        # Find the relevant columns
+        quarter_col = None
+        location_col = None
+        quantity_col = None
+        
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            if 'quarter' in col_lower:
+                quarter_col = col
+            elif 'location' in col_lower:
+                location_col = col
+            elif 'quantity' in col_lower and 'received' in col_lower:
+                quantity_col = col
+        
+        if not all([quarter_col, location_col, quantity_col]):
+            logger.error(f"    ✗ Missing required columns!")
+            raise ValueError("Service Completion sheet missing required columns")
+        
+        logger.info(f"    ✓ Found required columns:")
+        logger.info(f"      Quarter: '{quarter_col}'")
+        logger.info(f"      Location: '{location_col}'")
+        logger.info(f"      Quantity Received: '{quantity_col}'")
+        
+        # Clean the data
+        import numpy as np
+        df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
+        df = df.replace([np.nan, np.inf, -np.inf], None)
+        
+        # Filter valid rows
+        df_clean = df[
+            df[quarter_col].notna() & 
+            df[location_col].notna() & 
+            df[quantity_col].notna()
+        ].copy()
+        
+        logger.info(f"    ✓ Cleaned data: {len(df_clean)} valid rows")
+        
+        # Normalize locations and prepare data
+        mapped_data = []
+        for idx, row in df_clean.iterrows():
+            quarter = str(row[quarter_col]).strip()
+            original_location = str(row[location_col]).strip()
+            
+            try:
+                quantity_received = int(float(row[quantity_col]))
+            except (ValueError, TypeError):
+                logger.warning(f"      Skipping row {idx}: invalid quantity")
+                continue
+            
+            normalized_location = normalize_location(original_location)
+            
+            mapped_data.append({
+                "quarter": quarter,
+                "original_location": original_location,
+                "normalized_location": normalized_location,
+                "quantity_received": quantity_received,
+                "gift_type": "Service Completion"
+            })
+        
+        logger.info(f"    ✓ Processed {len(mapped_data)} records")
+        
+        # Save to database if s3_url provided
+        if s3_url and mapped_data:
+            logger.info(f"    Saving {len(mapped_data)} Service Completion records to database...")
+            headers = ["quarter", "original_location", "normalized_location", "quantity_received", "gift_type"]
+            data_rows = [[
+                item["quarter"],
+                item["original_location"],
+                item["normalized_location"],
+                item["quantity_received"],
+                item["gift_type"]
+            ] for item in mapped_data]
+            
+            # Note: We'll save this as "Service Completion" workbook with "Multiple" quarters
+            await async_save_category_data("inventory", s3_url, headers, data_rows, "Service Completion", "Multiple")
+            logger.info(f"    ✓ Saved Service Completion data to database")
+        
+        # Group by quarter for summary
+        quarters = {}
+        for record in mapped_data:
+            q = record['quarter']
+            if q not in quarters:
+                quarters[q] = 0
+            quarters[q] += record['quantity_received']
+        
+        logger.info(f"    Summary by quarter:")
+        for q, total in sorted(quarters.items()):
+            logger.info(f"      {q}: {total} total gifts")
+        
+        # Prepare return data
+        headers = ["quarter", "original_location", "normalized_location", "quantity_received", "gift_type"]
+        data_rows = [[
+            item["quarter"],
+            item["original_location"],
+            item["normalized_location"],
+            item["quantity_received"],
+            item["gift_type"]
+        ] for item in mapped_data]
+        
+        logger.info(f"    ★★★ ASYNC SERVICE COMPLETION EXTRACTION COMPLETE ★★★")
+        
+        return {
+            "workbook": "Service Completion",
+            "headers": headers,
+            "data": data_rows,
+            "mapped_data": mapped_data,
+            "row_count": len(data_rows),
+            "column_count": len(headers),
+            "quarter": "Multiple",
+            "quarters_summary": quarters
+        }
+        
+    except Exception as e:
+        logger.exception(f"    ✗ Failed async service completion extraction: {e}")
         raise
