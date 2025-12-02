@@ -1,12 +1,14 @@
 import asyncio
 import pandas as pd
 import logging
+from config.settings import BIRTHDAY_GIFTS_ROW, ANNIVERSARY_GIFTS_ROW
 
 logger = logging.getLogger(__name__)
 
 
 async def async_parse_excel_dynamic(file_obj, filename: str, category: str):
     """Parse Excel/CSV file with dynamic header extraction"""
+    logger.info(f"Starting async parse for file: {filename}, category: {category}")
     return await asyncio.to_thread(parse_excel_dynamic, file_obj, filename, category)
 
 
@@ -24,12 +26,14 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
         
         # For inventory category, we need to handle multiple sheets
         if category == "inventory" and (lower.endswith(".xlsx") or lower.endswith(".xls")):
+            logger.info("Detected inventory workbook - processing multiple sheets")
             return parse_inventory_workbook(file_obj, filename)
         
         # For other categories or CSV files
         if lower.endswith(".xlsx") or lower.endswith(".xls"):
             df = None
             
+            logger.info("Attempting to detect header row...")
             # Try to detect header row automatically
             for header_row in [0, 1, 2]:
                 try:
@@ -39,7 +43,7 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
                     unnamed_count = sum(1 for col in temp_df.columns if str(col).startswith("Unnamed"))
                     if unnamed_count < len(temp_df.columns) * 0.5:
                         df = temp_df
-                        logger.info(f"Found valid headers at row {header_row}")
+                        logger.info(f"✓ Found valid headers at row {header_row}")
                         break
                     
                     file_obj.seek(0)
@@ -57,20 +61,22 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
                 df = df.iloc[:, 1:]
                 
         elif lower.endswith(".csv"):
+            logger.info("Reading CSV file")
             df = pd.read_csv(file_obj)
-            logger.info("Read CSV file")
+            logger.info("✓ CSV file read successfully")
         else:
             raise ValueError(f"Unsupported file type: {filename}")
         
         # Extract headers
         headers = [str(col).strip() for col in df.columns]
-        logger.info(f"Extracted {len(headers)} headers: {headers}")
+        logger.info(f"✓ Extracted {len(headers)} headers: {headers[:5]}..." if len(headers) > 5 else f"✓ Extracted {len(headers)} headers: {headers}")
         
         # Replace NaN, NaT, and inf values with None
-        df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
-        
         import numpy as np
+        df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
         df = df.replace([np.nan, np.inf, -np.inf], None)
+        
+        logger.info("✓ Cleaned NaN and inf values")
         
         # Convert dataframe to list of lists
         data = df.values.tolist()
@@ -78,8 +84,9 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
         # Clean data - remove completely empty rows
         data = [row for row in data if any(val is not None and str(val).strip() for val in row if val is not None)]
         
-        logger.info(f"Parsed {len(data)} rows of data")
-        logger.info(f"Sample row 0: {data[0] if data else 'No data'}")
+        logger.info(f"✓ Parsed {len(data)} rows of data")
+        if data:
+            logger.info(f"Sample first row: {data[0][:3]}..." if len(data[0]) > 3 else f"Sample first row: {data[0]}")
         logger.info("=" * 80)
         
         return {
@@ -92,19 +99,18 @@ def parse_excel_dynamic(file_obj, filename: str, category: str):
         }
         
     except Exception as e:
-        logger.exception(f"Failed to parse file: {e}")
+        logger.exception(f"✗ Failed to parse file: {e}")
         raise
 
 
 def parse_inventory_workbook(file_obj, filename: str):
     """
     Parse inventory Excel file with multiple worksheets.
-    Returns a list of parsed sheets with their metadata.
+    For "As On 03-10-25" workbook, extract specific rows for birthday and anniversary gifts.
     
-    Detects these workbook names:
-    - Birthday
-    - As On 03-10-25 (Anniversary gifts)
-    - Service Completion
+    Special handling:
+    - Row 5 (index 4): Birthday gifts quantities by location
+    - Row 8 (index 7): Anniversary gifts quantities by location
     """
     logger.info("=" * 80)
     logger.info("PARSING INVENTORY WORKBOOK WITH MULTIPLE SHEETS")
@@ -116,11 +122,11 @@ def parse_inventory_workbook(file_obj, filename: str):
         sheet_names = excel_file.sheet_names
         logger.info(f"Found {len(sheet_names)} sheets: {sheet_names}")
         
-        # Target workbook names - now includes all three types
+        # Target workbook names
         target_workbooks = [
             "Birthday",
-            "As On 03-10-25",  # Anniversary workbook
-            "As on 03-10-25",  # Case variation
+            "As On 03-10-25",
+            "As on 03-10-25",
             "Service Completion"
         ]
         
@@ -128,10 +134,11 @@ def parse_inventory_workbook(file_obj, filename: str):
         
         for sheet_name in sheet_names:
             # Check if this sheet is one of our target workbooks
-            # Use case-insensitive comparison
             sheet_name_clean = sheet_name.strip()
             is_target = False
             matched_name = None
+            
+            logger.info(f"Checking sheet: '{sheet_name}'")
             
             for target in target_workbooks:
                 if sheet_name_clean.lower() == target.lower():
@@ -139,19 +146,26 @@ def parse_inventory_workbook(file_obj, filename: str):
                     # Use the standardized name
                     if "birthday" in target.lower():
                         matched_name = "Birthday"
-                    elif "as on" in target.lower() or "as on" in target.lower():
+                    elif "as on" in target.lower():
                         matched_name = "As on 03-10-25"
                     elif "service" in target.lower():
                         matched_name = "Service Completion"
                     break
             
             if not is_target:
-                logger.info(f"Skipping sheet: {sheet_name}")
+                logger.info(f"  ⊘ Skipping sheet: {sheet_name} (not a target workbook)")
                 continue
             
-            logger.info(f"Processing sheet: {sheet_name} (mapped to: {matched_name})")
+            logger.info(f"  → Processing sheet: '{sheet_name}' (mapped to: '{matched_name}')")
             
-            # Read the sheet with header detection
+            # Special handling for "As On 03-10-25" workbook
+            if matched_name == "As on 03-10-25":
+                logger.info(f"  ★ Special processing for Anniversary/Birthday gifts workbook")
+                result = parse_anniversary_birthday_sheet(file_obj, sheet_name, matched_name)
+                all_sheets_data.extend(result)
+                continue
+            
+            # Standard processing for other sheets
             df = None
             for header_row in [0, 1, 2]:
                 try:
@@ -162,13 +176,13 @@ def parse_inventory_workbook(file_obj, filename: str):
                     unnamed_count = sum(1 for col in temp_df.columns if str(col).startswith("Unnamed"))
                     if unnamed_count < len(temp_df.columns) * 0.5:
                         df = temp_df
-                        logger.info(f"  Found valid headers at row {header_row}")
+                        logger.info(f"    ✓ Found valid headers at row {header_row}")
                         break
                 except Exception as e:
-                    logger.debug(f"  Failed with header_row={header_row}: {e}")
+                    logger.debug(f"    Failed with header_row={header_row}: {e}")
             
             if df is None:
-                logger.info(f"  Using default header row (0)")
+                logger.info(f"    Using default header row (0)")
                 file_obj.seek(0)
                 df = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
             
@@ -177,50 +191,35 @@ def parse_inventory_workbook(file_obj, filename: str):
             if len(df.columns) > 0:
                 first_col_name = str(df.columns[0])
                 if "quarter" in first_col_name.lower():
-                    # Quarter is in the first column - extract from first data row
                     if len(df) > 0:
                         quarter = str(df.iloc[0, 0])
-                        logger.info(f"  Detected quarter from data: {quarter}")
+                        logger.info(f"    ✓ Detected quarter: {quarter}")
             
             # Drop unnamed leading columns
             while len(df.columns) > 0 and str(df.columns[0]).startswith("Unnamed"):
-                logger.info(f"  Dropping unnamed first column: {df.columns[0]}")
+                logger.info(f"    Dropping unnamed column: {df.columns[0]}")
                 df = df.iloc[:, 1:]
-            
-            # If first column is Quarter, keep it
-            if len(df.columns) > 0 and "quarter" in str(df.columns[0]).lower():
-                logger.info(f"  Keeping Quarter column: {df.columns[0]}")
             
             # Extract headers
             headers = [str(col).strip() for col in df.columns]
-            logger.info(f"  Extracted {len(headers)} headers: {headers}")
+            logger.info(f"    ✓ Extracted {len(headers)} headers")
             
             # Replace NaN, NaT, and inf values with None
-            df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
-            
             import numpy as np
+            df = df.replace({pd.NA: None, pd.NaT: None, float('nan'): None, float('inf'): None, float('-inf'): None})
             df = df.replace([np.nan, np.inf, -np.inf], None)
             
             # Convert dataframe to list of lists
             data = df.values.tolist()
             
-            # Clean data - remove completely empty rows
+            # Clean data
             data = [row for row in data if any(val is not None and str(val).strip() if val is not None else False for val in row)]
             
-            logger.info(f"  Parsed {len(data)} rows from sheet '{sheet_name}'")
+            logger.info(f"    ✓ Parsed {len(data)} rows from sheet '{sheet_name}'")
             
-            # If we didn't find quarter in first column, check if it's in the Quarter column
-            if not quarter and "Quarter" in headers:
-                quarter_idx = headers.index("Quarter")
-                for row in data:
-                    if len(row) > quarter_idx and row[quarter_idx]:
-                        quarter = str(row[quarter_idx])
-                        logger.info(f"  Detected quarter from Quarter column: {quarter}")
-                        break
-            
-            # Store this sheet's data with the matched/standardized name
+            # Store this sheet's data
             all_sheets_data.append({
-                "workbook": matched_name,  # Use standardized name
+                "workbook": matched_name,
                 "headers": headers,
                 "data": data,
                 "row_count": len(data),
@@ -229,18 +228,97 @@ def parse_inventory_workbook(file_obj, filename: str):
             })
         
         logger.info("=" * 80)
-        logger.info(f"Successfully parsed {len(all_sheets_data)} workbook sheets:")
+        logger.info(f"✓ Successfully parsed {len(all_sheets_data)} workbook sheets:")
         for sheet in all_sheets_data:
-            logger.info(f"  - {sheet['workbook']}: {sheet['row_count']} rows, quarter: {sheet.get('quarter', 'N/A')}")
+            logger.info(f"    - {sheet['workbook']}: {sheet['row_count']} rows, quarter: {sheet.get('quarter', 'N/A')}")
         logger.info("=" * 80)
         
         if len(all_sheets_data) == 0:
-            logger.warning("WARNING: No target worksheets found!")
-            logger.warning(f"Available sheets were: {sheet_names}")
+            logger.warning("⚠ WARNING: No target worksheets found!")
+            logger.warning(f"Available sheets: {sheet_names}")
             logger.warning(f"Looking for: {target_workbooks}")
         
         return {"sheets": all_sheets_data}
         
     except Exception as e:
-        logger.exception(f"Failed to parse inventory workbook: {e}")
+        logger.exception(f"✗ Failed to parse inventory workbook: {e}")
+        raise
+
+
+def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_name: str):
+    """
+    Special parser for "As On 03-10-25" workbook.
+    Extracts birthday gifts from row 5 and anniversary gifts from row 8.
+    
+    Returns a list with two sheet data objects:
+    1. Birthday gifts data
+    2. Anniversary gifts data
+    """
+    logger.info(f"    ★★★ SPECIAL ROW-BASED EXTRACTION ★★★")
+    logger.info(f"    Birthday gifts row: {BIRTHDAY_GIFTS_ROW} (index {BIRTHDAY_GIFTS_ROW-1})")
+    logger.info(f"    Anniversary gifts row: {ANNIVERSARY_GIFTS_ROW} (index {ANNIVERSARY_GIFTS_ROW-1})")
+    
+    try:
+        file_obj.seek(0)
+        # Read without header to get raw data
+        df_raw = pd.read_excel(file_obj, sheet_name=sheet_name, header=None)
+        
+        logger.info(f"    Raw sheet dimensions: {df_raw.shape[0]} rows × {df_raw.shape[1]} columns")
+        
+        # Read with header to get column names
+        file_obj.seek(0)
+        df_header = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
+        headers = [str(col).strip() for col in df_header.columns]
+        
+        logger.info(f"    Headers: {headers}")
+        
+        result_sheets = []
+        
+        # Extract Birthday gifts (row 5, index 4)
+        if len(df_raw) >= BIRTHDAY_GIFTS_ROW:
+            birthday_row = df_raw.iloc[BIRTHDAY_GIFTS_ROW - 1].tolist()
+            logger.info(f"    ✓ Extracted Birthday row {BIRTHDAY_GIFTS_ROW}: {birthday_row[:5]}...")
+            
+            # Create structured data with location-quantity pairs
+            birthday_data = [birthday_row]
+            
+            result_sheets.append({
+                "workbook": "Birthday",
+                "headers": headers,
+                "data": birthday_data,
+                "row_count": 1,
+                "column_count": len(headers),
+                "quarter": None,
+                "special_row": BIRTHDAY_GIFTS_ROW
+            })
+            logger.info(f"    ✓ Created Birthday gifts dataset with {len(birthday_data)} rows")
+        else:
+            logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Birthday row {BIRTHDAY_GIFTS_ROW}")
+        
+        # Extract Anniversary gifts (row 8, index 7)
+        if len(df_raw) >= ANNIVERSARY_GIFTS_ROW:
+            anniversary_row = df_raw.iloc[ANNIVERSARY_GIFTS_ROW - 1].tolist()
+            logger.info(f"    ✓ Extracted Anniversary row {ANNIVERSARY_GIFTS_ROW}: {anniversary_row[:5]}...")
+            
+            # Create structured data with location-quantity pairs
+            anniversary_data = [anniversary_row]
+            
+            result_sheets.append({
+                "workbook": "As on 03-10-25",
+                "headers": headers,
+                "data": anniversary_data,
+                "row_count": 1,
+                "column_count": len(headers),
+                "quarter": None,
+                "special_row": ANNIVERSARY_GIFTS_ROW
+            })
+            logger.info(f"    ✓ Created Anniversary gifts dataset with {len(anniversary_data)} rows")
+        else:
+            logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Anniversary row {ANNIVERSARY_GIFTS_ROW}")
+        
+        logger.info(f"    ★★★ SPECIAL EXTRACTION COMPLETE: {len(result_sheets)} datasets created ★★★")
+        return result_sheets
+        
+    except Exception as e:
+        logger.exception(f"    ✗ Failed special row extraction: {e}")
         raise

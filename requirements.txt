@@ -12,3 +12,4 @@ botocore
 uvicorn[standard]
 python-dateutil
 pydantic[email]
+jwt
