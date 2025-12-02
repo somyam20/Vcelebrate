@@ -295,10 +295,13 @@ def save_category_data(category: str, s3_url: str, headers: list, data: list, wo
                     cleaned_value = clean_value(value)
                     row_data[header] = cleaned_value
                 
-                # Extract location (from "Location" column)
+                # Extract location (from "normalized_location" or "location" column)
                 location = None
                 for header, value in zip(headers, row):
-                    if "location" in header.lower():
+                    if "normalized_location" in header.lower():
+                        location = clean_value(value)
+                        break
+                    elif "location" in header.lower() and "original" not in header.lower():
                         location = clean_value(value)
                         break
                 
