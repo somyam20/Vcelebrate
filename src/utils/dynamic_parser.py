@@ -249,10 +249,11 @@ def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_name: st
     """
     Special parser for "As On 03-10-25" workbook.
     Extracts birthday gifts from row 5 and anniversary gifts from row 8.
+    Creates proper location-to-quantity mapping.
     
     Returns a list with two sheet data objects:
-    1. Birthday gifts data
-    2. Anniversary gifts data
+    1. Birthday gifts data (mapped by location)
+    2. Anniversary gifts data (mapped by location)
     """
     logger.info(f"    ★★★ SPECIAL ROW-BASED EXTRACTION ★★★")
     logger.info(f"    Birthday gifts row: {BIRTHDAY_GIFTS_ROW} (index {BIRTHDAY_GIFTS_ROW-1})")
@@ -265,33 +266,73 @@ def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_name: st
         
         logger.info(f"    Raw sheet dimensions: {df_raw.shape[0]} rows × {df_raw.shape[1]} columns")
         
-        # Read with header to get column names
+        # Read with header to get column names (locations)
         file_obj.seek(0)
         df_header = pd.read_excel(file_obj, sheet_name=sheet_name, header=0)
         headers = [str(col).strip() for col in df_header.columns]
         
-        logger.info(f"    Headers: {headers}")
+        logger.info(f"    Headers (Locations): {headers}")
         
         result_sheets = []
+        
+        # Helper function to create location-quantity mapped data
+        def create_location_quantity_data(row_data, headers, gift_type):
+            """
+            Convert a row of quantities into proper location-mapped data.
+            Each location gets its own row with the quantity from that column.
+            """
+            mapped_data = []
+            
+            for col_idx, location in enumerate(headers):
+                # Skip if location is not meaningful
+                if not location or location.startswith("Unnamed") or location == "":
+                    continue
+                
+                # Get quantity for this location (default to 0 if missing/NaN)
+                quantity = 0
+                if col_idx < len(row_data):
+                    value = row_data[col_idx]
+                    if value is not None and not pd.isna(value):
+                        try:
+                            quantity = int(float(value))
+                        except (ValueError, TypeError):
+                            quantity = 0
+                
+                # Create a row with Location and Quantity Received
+                mapped_row = {
+                    "Location": location,
+                    "Quantity Received": quantity
+                }
+                
+                mapped_data.append(mapped_row)
+                logger.debug(f"      Mapped {gift_type}: {location} → {quantity} units")
+            
+            return mapped_data
         
         # Extract Birthday gifts (row 5, index 4)
         if len(df_raw) >= BIRTHDAY_GIFTS_ROW:
             birthday_row = df_raw.iloc[BIRTHDAY_GIFTS_ROW - 1].tolist()
             logger.info(f"    ✓ Extracted Birthday row {BIRTHDAY_GIFTS_ROW}: {birthday_row[:5]}...")
             
-            # Create structured data with location-quantity pairs
-            birthday_data = [birthday_row]
+            # Create location-mapped data
+            birthday_data = create_location_quantity_data(birthday_row, headers, "Birthday")
+            
+            # Convert mapped data back to list format for database storage
+            # But keep the structure that db.py expects: list of dicts
+            birthday_data_rows = []
+            for item in birthday_data:
+                birthday_data_rows.append([item["Location"], item["Quantity Received"]])
             
             result_sheets.append({
                 "workbook": "Birthday",
-                "headers": headers,
-                "data": birthday_data,
-                "row_count": 1,
-                "column_count": len(headers),
+                "headers": ["Location", "Quantity Received"],
+                "data": birthday_data_rows,
+                "row_count": len(birthday_data_rows),
+                "column_count": 2,
                 "quarter": None,
                 "special_row": BIRTHDAY_GIFTS_ROW
             })
-            logger.info(f"    ✓ Created Birthday gifts dataset with {len(birthday_data)} rows")
+            logger.info(f"    ✓ Created Birthday gifts dataset with {len(birthday_data)} location mappings")
         else:
             logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Birthday row {BIRTHDAY_GIFTS_ROW}")
         
@@ -300,19 +341,24 @@ def parse_anniversary_birthday_sheet(file_obj, sheet_name: str, matched_name: st
             anniversary_row = df_raw.iloc[ANNIVERSARY_GIFTS_ROW - 1].tolist()
             logger.info(f"    ✓ Extracted Anniversary row {ANNIVERSARY_GIFTS_ROW}: {anniversary_row[:5]}...")
             
-            # Create structured data with location-quantity pairs
-            anniversary_data = [anniversary_row]
+            # Create location-mapped data
+            anniversary_data = create_location_quantity_data(anniversary_row, headers, "Anniversary")
+            
+            # Convert mapped data back to list format for database storage
+            anniversary_data_rows = []
+            for item in anniversary_data:
+                anniversary_data_rows.append([item["Location"], item["Quantity Received"]])
             
             result_sheets.append({
                 "workbook": "As on 03-10-25",
-                "headers": headers,
-                "data": anniversary_data,
-                "row_count": 1,
-                "column_count": len(headers),
+                "headers": ["Location", "Quantity Received"],
+                "data": anniversary_data_rows,
+                "row_count": len(anniversary_data_rows),
+                "column_count": 2,
                 "quarter": None,
                 "special_row": ANNIVERSARY_GIFTS_ROW
             })
-            logger.info(f"    ✓ Created Anniversary gifts dataset with {len(anniversary_data)} rows")
+            logger.info(f"    ✓ Created Anniversary gifts dataset with {len(anniversary_data)} location mappings")
         else:
             logger.warning(f"    ⚠ Sheet has only {len(df_raw)} rows, cannot extract Anniversary row {ANNIVERSARY_GIFTS_ROW}")
         
