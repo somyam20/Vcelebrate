@@ -72,6 +72,7 @@ INVENTORY_QUARTER_COL = "_quarter"
 # Location Name Normalization
 LOCATION_ALIASES = {
     "YASH IT Part": "Indore-YASH IT Park-SC-DC",
+    "Indore YIT": "Indore-YASH IT Park-SC-DC",
     "YIT": "Indore-YASH IT Park-SC-DC",
     "Yash IT Park": "Indore-YASH IT Park-SC-DC",
     "YASH IT Park": "Indore-YASH IT Park-SC-DC",
