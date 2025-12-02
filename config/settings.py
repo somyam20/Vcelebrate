@@ -19,58 +19,37 @@ S3_UPLOAD_PREFIX = os.getenv("S3_UPLOAD_PREFIX", "projects/")
 # Category configuration
 CATEGORIES = ["milestone", "welcome_kit", "inventory"]
 
-# ============================================================================
-# MILESTONE DATA FIELD MAPPINGS
-# ============================================================================
+# Milestone Data Field Mappings
 # These are the column names we look for in the milestone data
-# Updated based on your actual data structure
-
-# Date fields - primary (full dates)
 DATE_OF_BIRTH_COL = "Date of Birth (as per Records)"
+DATE_OF_BIRTH_MONTH_COL = "MM Birth - WE Celebrate"  # Pre-calculated month field (1-12)
 DATE_OF_MARRIAGE_COL = "Date of Marriage"
 DATE_OF_JOINING_COL = "Employment Details Date of Joining"
-
-# Date fields - pre-calculated month fields (preferred for calculations)
-DATE_OF_BIRTH_MONTH_COL = "MM Birth - WE Celebrate"
-DATE_OF_JOINING_MONTH_COL = "MM Service Completion - WE Celebrate"
-
-# DOJ - WE Celebrate is used for service completion anniversaries
-DOJ_CELEBRATE_COL = "DOJ - WE Celebrate"
-
-# Location fields (try both)
-LOCATION_COL = "Base Location  Name"  # Primary location field
-LOCATION_ALT_COL = "Place of posting"  # Alternative location field
-
-# Employee identification
+DATE_OF_JOINING_WE_COL = "DOJ - WE Celebrate"  # WE Celebrate date
+DATE_OF_JOINING_MONTH_COL = "MM Service Completion - WE Celebrate"  # Pre-calculated month field (1-12)
+LOCATION_COL = "Place of posting"
+LOCATION_ALT_COL = "Base Location  Name"  # Alternate location field (note the double space)
 EMPLOYEE_NAME_COL = "Full Name"
-EMPLOYEE_ID_COL = "User/Employee ID"
 
-# ============================================================================
-# INVENTORY DATA FIELD MAPPINGS
-# ============================================================================
-
-# Inventory workbook names (worksheet names in Excel)
+# Inventory Workbook Names
+# These match the worksheet names in the inventory Excel file
 INVENTORY_WORKBOOKS = {
     "birthday": "Birthday",
-    "anniversary": "As on 03-10-25",  # Anniversary workbook
+    "anniversary": "As on 03-10-25",  # Anniversary workbook name (note: lowercase 'on')
     "service_completion": "Service Completion"
 }
 
-# Inventory column names
+# Inventory Thresholds
+LOW_INVENTORY_THRESHOLD = 40  # Alert when inventory goes below this number
+
+# Inventory Data Field Mappings
 INVENTORY_LOCATION_COL = "Location"
 INVENTORY_QUANTITY_COL = "Quantity Received"
 INVENTORY_WORKBOOK_COL = "_workbook"  # Internal field added during parsing
-INVENTORY_QUARTER_COL = "_quarter"    # Internal field added during parsing
+INVENTORY_QUARTER_COL = "_quarter"  # Internal field added during parsing
 
-# Low inventory threshold (alert when below this number)
-LOW_INVENTORY_THRESHOLD = 40
-
-# ============================================================================
-# LOCATION NAME NORMALIZATION
-# ============================================================================
+# Location Name Normalization
 # Map common location name variations to standard names
-# This helps match user queries with database values
-
 LOCATION_ALIASES = {
     "YASH IT Part": "Indore-YASH IT Park-SC-DC",
     "YIT": "Indore-YASH IT Park-SC-DC",
@@ -78,12 +57,21 @@ LOCATION_ALIASES = {
     "YASH IT Park": "Indore-YASH IT Park-SC-DC",
     "Mindspace": "Hyderabad-Mindspace I-DC",
     "BTC": "Indore-BTC-CO",
-    # Add more aliases as needed based on user queries
-}
+    "Indore YIT":"Indore-YASH IT Park-SC-DC",
+    "CIT":"Indore-YASH IT Park-SC-DC",
+    "Hyd":"Hyderabad-Mindspace I-DC",
+    "Magarpatta":"Pune",
+    "MIDC":"Hyderabad-Mindspace I-DC",
+    "BNG":"Bangalore",
+    "Pune-Hinjewadi III-DC":"Pune",
+    "Indore-Crystal IT Park-DC":"Indore-YASH IT Park-SC-DC",
+    "Bangalore-Whitefield-DC":"Bangalore",
+    "Bangalore-BHIVE-DC":"Bangalore"
 
-# ============================================================================
-# SCHEDULER SETTINGS
-# ============================================================================
+
+
+    # Add more aliases as needed
+}
 
 # When to run monthly inventory updates
 INVENTORY_UPDATE_DAY = 1      # 1st of each month

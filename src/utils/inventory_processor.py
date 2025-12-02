@@ -23,12 +23,24 @@ def extract_month_from_date(date_value):
         return None
     
     try:
+        # Handle numeric month values (1-12)
         if isinstance(date_value, (int, float)):
-            return int(date_value)
+            month_num = int(date_value)
+            if 1 <= month_num <= 12:
+                return month_num
+            return None
         
         date_str = str(date_value).strip()
         if not date_str or date_str.lower() in ['nan', 'nat', 'none', '']:
             return None
+        
+        # Check if it's just a number string
+        try:
+            month_num = int(date_str)
+            if 1 <= month_num <= 12:
+                return month_num
+        except:
+            pass
         
         # Try to parse as date
         parsed_date = parse(date_str)
