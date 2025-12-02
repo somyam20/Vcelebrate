@@ -72,7 +72,8 @@ async def upload_file(
         parsed_data = await async_parse_excel_dynamic(
             io.BytesIO(data_bytes),
             filename,
-            category
+            category,
+            s3_url
         )
         
         # Step 3: Save to database
