@@ -3,6 +3,12 @@ import json
 from fastapi import APIRouter, HTTPException, Form, Request
 from src.utils.db import async_get_all_data
 from src.utils.inventory_processor import get_monthly_summary, check_and_update_inventory
+from src.utils.inventory_projections import (
+    calculate_remaining_gifts_next_month,
+    calculate_months_until_restock,
+    get_location_inventory_projection,
+    get_all_locations_restock_schedule
+)
 from config.config import get_model_config
 from config.settings import CATEGORIES
 import logging
@@ -40,20 +46,11 @@ async def query_data(
     
     Special queries:
     - "update inventory" or "trigger update" - Manually updates inventory
-    - "inventory status" or "system status" - Shows current status
+    - "inventory status" or "system status" - Shows current system status
+    - "remaining gifts [location]" - Shows remaining gifts projection for location
+    - "restock schedule [location]" - Shows when restocking is needed
+    - "all restock schedules" - Shows restock schedule for all locations
     - Any other query - Normal LLM-powered query
-    
-    Usage with curl:
-    curl -X POST "http://localhost:8000/api/query" \
-         -H "Authorization: Bearer token" \
-         -F "query=how many birthdays in december?" \
-         -F "user_metadata={\"team_id\":\"team123\"}"
-    
-    Trigger inventory update:
-    curl -X POST "http://localhost:8000/api/query" \
-         -H "Authorization: Bearer token" \
-         -F "query=update inventory" \
-         -F "user_metadata={\"team_id\":\"team123\"}"
     """
     logger.info("=" * 80)
     logger.info("QUERY REQUEST START")
@@ -199,6 +196,170 @@ Location Breakdown:
                 "current_date": current_date.strftime('%Y-%m-%d')
             }
     
+    # Handle "remaining gifts" projection command
+    if any(keyword in query_lower for keyword in ["remaining gifts", "gifts left", "how many gifts left", "gifts remaining"]):
+        logger.info("SPECIAL COMMAND: Remaining gifts projection")
+        try:
+            # Extract location from query (simple extraction)
+            location = None
+            common_locations = ["indore", "yit", "hyderabad", "bangalore", "pune", "btc"]
+            for loc in common_locations:
+                if loc in query_lower:
+                    location = loc
+                    break
+            
+            if not location:
+                return {
+                    "query": query,
+                    "answer": "Please specify a location (e.g., 'Indore YIT', 'Hyderabad', 'Bangalore')",
+                    "command": "remaining_gifts",
+                    "status": "error"
+                }
+            
+            # Determine gift type if specified
+            gift_type = None
+            if "birthday" in query_lower:
+                gift_type = "birthday"
+            elif "anniversary" in query_lower:
+                gift_type = "anniversary"
+            elif "service" in query_lower:
+                gift_type = "service_completion"
+            
+            result = await calculate_remaining_gifts_next_month(location, gift_type)
+            
+            if "error" in result:
+                return {
+                    "query": query,
+                    "answer": result["error"],
+                    "command": "remaining_gifts",
+                    "status": "error"
+                }
+            
+            response_text = f"""Remaining Gifts Projection for {result['normalized_location']}
+
+Current Month: {result['current_month']} {result['current_year']}
+Next Month: {result['next_month']} {result['next_year']}
+
+"""
+            
+            for gtype, data in result['projections'].items():
+                response_text += f"\n{gtype.replace('_', ' ').title()} Gifts:\n"
+                response_text += f"  Current Stock: {data['current_stock']}\n"
+                response_text += f"  This Month Usage: {data['current_month_usage']}\n"
+                response_text += f"  Remaining Next Month: {data['remaining_after_current_month']}\n"
+                response_text += f"  Status: {data['status'].upper()}\n"
+            
+            return {
+                "query": query,
+                "answer": response_text,
+                "command": "remaining_gifts",
+                "status": "success",
+                "projection_data": result
+            }
+            
+        except Exception as e:
+            logger.exception(f"Failed to calculate remaining gifts: {e}")
+            return {
+                "query": query,
+                "answer": f"Error calculating remaining gifts: {str(e)}",
+                "command": "remaining_gifts",
+                "status": "error"
+            }
+    
+    # Handle "restock schedule" command
+    if any(keyword in query_lower for keyword in ["restock", "when to restock", "months until restock", "restock schedule"]):
+        logger.info("SPECIAL COMMAND: Restock schedule")
+        try:
+            # Check if "all locations" requested
+            if any(keyword in query_lower for keyword in ["all locations", "all location", "every location"]):
+                result = await get_all_locations_restock_schedule()
+                
+                response_text = f"""Restock Schedule for All Locations
+
+Generated: {result['generated_at']}
+Total Locations: {result['total_locations']}
+Projection Period: {result['projection_months']} months
+
+"""
+                
+                if result['urgent_restocks']:
+                    response_text += f"\nURGENT RESTOCKS (Within 3 months):\n"
+                    for urgent in result['urgent_restocks']:
+                        response_text += f"\n{urgent['location']}:\n"
+                        response_text += f"  Restock needed in: {urgent['months_until_restock']} month(s)\n"
+                        details = urgent['details']
+                        response_text += f"  Birthday gifts: {details.get('birthday_restock_in_months')} months\n"
+                        response_text += f"  Anniversary gifts: {details.get('anniversary_restock_in_months')} months\n"
+                        response_text += f"  Service gifts: {details.get('service_restock_in_months')} months\n"
+                
+                response_text += f"\n\nFull restock schedule available in projection_data.\n"
+                
+                return {
+                    "query": query,
+                    "answer": response_text,
+                    "command": "restock_schedule_all",
+                    "status": "success",
+                    "projection_data": result
+                }
+            
+            # Single location restock schedule
+            location = None
+            common_locations = ["indore", "yit", "hyderabad", "bangalore", "pune", "btc"]
+            for loc in common_locations:
+                if loc in query_lower:
+                    location = loc
+                    break
+            
+            if not location:
+                return {
+                    "query": query,
+                    "answer": "Please specify a location or use 'all locations'",
+                    "command": "restock_schedule",
+                    "status": "error"
+                }
+            
+            result = await get_location_inventory_projection(location)
+            
+            if "error" in result:
+                return {
+                    "query": query,
+                    "answer": result["error"],
+                    "command": "restock_schedule",
+                    "status": "error"
+                }
+            
+            response_text = f"""Restock Schedule for {result['normalized_location']}
+
+Generated: {result['generated_at']}
+Projection Period: {result['projection_months']} months
+
+Summary:
+- Birthday Gifts: Restock in {result['summary']['birthday_restock_in_months']} months
+- Anniversary Gifts: Restock in {result['summary']['anniversary_restock_in_months']} months
+- Service Completion Gifts: Restock in {result['summary']['service_restock_in_months']} months
+
+Earliest Restock Needed: {result['summary']['earliest_restock_needed']} month(s)
+
+Detailed breakdown available in projection_data.
+"""
+            
+            return {
+                "query": query,
+                "answer": response_text,
+                "command": "restock_schedule",
+                "status": "success",
+                "projection_data": result
+            }
+            
+        except Exception as e:
+            logger.exception(f"Failed to calculate restock schedule: {e}")
+            return {
+                "query": query,
+                "answer": f"Error calculating restock schedule: {str(e)}",
+                "command": "restock_schedule",
+                "status": "error"
+            }
+    
     # Normal query processing with LLM
     try:
         # Get team's LLM configuration
@@ -322,6 +483,14 @@ RAW WELCOME KIT DATA:
 Sample of {len(welcome_kit_sample)} records
 {json.dumps(welcome_kit_sample[:3], indent=2, default=str)}
 
+ADVANCED FEATURES AVAILABLE:
+The system can calculate:
+1. Remaining gifts next month at any location
+2. Months until restock is needed for any gift type
+3. Complete restock schedules across all locations
+
+If the user asks about future inventory, remaining gifts, or when to restock, you can mention these features are available via special queries.
+
 USER QUESTION:
 {query}
 
@@ -341,6 +510,10 @@ INSTRUCTIONS:
 6. For low inventory alerts: Use the LOW INVENTORY ALERTS section above
 7. Provide clear, accurate answers based on the pre-calculated data
 8. Do not use asterisks or special formatting in your response - use plain text
+9. If the user asks about future projections or when to restock, mention they can use special queries like:
+   - "remaining gifts [location]" - to see next month projections
+   - "restock schedule [location]" - to see when restocking is needed
+   - "all restock schedules" - to see restock needs for all locations
 
 IMPORTANT NOTES:
 - All milestone counts are pre-calculated for the current month ({month_name} {current_year})
@@ -436,11 +609,16 @@ async def get_categories():
             "automatic_calculations": "System automatically calculates milestone counts for current month",
             "real_time_date": "Always aware of current date and month",
             "inventory_updates": "Automated monthly inventory updates on 1st of each month",
-            "low_inventory_alerts": "Automatic alerts when inventory drops below 40 units"
+            "low_inventory_alerts": "Automatic alerts when inventory drops below 40 units",
+            "inventory_projections": "Calculate remaining gifts and restock schedules",
+            "future_planning": "Project inventory needs for up to 24 months ahead"
         },
         "special_commands": {
             "update_inventory": "Query with 'update inventory' to manually trigger inventory update",
-            "check_status": "Query with 'inventory status' to see current system status"
+            "check_status": "Query with 'inventory status' to see current system status",
+            "remaining_gifts": "Query with 'remaining gifts [location]' to see next month projection",
+            "restock_schedule": "Query with 'restock schedule [location]' to see when restocking is needed",
+            "all_restocks": "Query with 'all restock schedules' to see all location restock needs"
         },
         "note": "The /query endpoint automatically accesses all categories and provides pre-calculated milestone counts for the current month"
     }

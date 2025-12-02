@@ -90,36 +90,6 @@ def init_db():
     cur = conn.cursor()
     
     try:
-        # Check if inventory_data table exists and has quarter column
-        logger.info("Checking for existing tables and columns...")
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'inventory_data' AND column_name = 'quarter';
-        """)
-        
-        has_quarter = cur.fetchone() is not None
-        logger.info(f"Quarter column exists: {has_quarter}")
-        
-        # If table exists but doesn't have quarter column, add it
-        if not has_quarter:
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'inventory_data'
-                );
-            """)
-            table_exists = cur.fetchone()[0]
-            
-            if table_exists:
-                logger.info("Adding 'quarter' column to existing inventory_data table")
-                cur.execute("""
-                    ALTER TABLE inventory_data 
-                    ADD COLUMN IF NOT EXISTS quarter TEXT;
-                """)
-                conn.commit()
-                logger.info("✓ Successfully added 'quarter' column")
-        
         # Projects table
         logger.info("Creating/verifying 'projects' table...")
         cur.execute("""
@@ -176,6 +146,36 @@ def init_db():
             );
         """)
         logger.info("✓ Inventory data table ready")
+        
+        # Check if inventory_data table has quarter column
+        logger.info("Checking for quarter column in inventory_data...")
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name = 'inventory_data' AND column_name = 'quarter';
+        """)
+        
+        has_quarter = cur.fetchone() is not None
+        logger.info(f"Quarter column exists: {has_quarter}")
+        
+        # If table exists but doesn't have quarter column, add it
+        if not has_quarter:
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'inventory_data'
+                );
+            """)
+            table_exists = cur.fetchone()[0]
+            
+            if table_exists:
+                logger.info("Adding 'quarter' column to existing inventory_data table")
+                cur.execute("""
+                    ALTER TABLE inventory_data 
+                    ADD COLUMN IF NOT EXISTS quarter TEXT;
+                """)
+                conn.commit()
+                logger.info("✓ Successfully added 'quarter' column")
         
         # Create indexes
         logger.info("Creating/verifying indexes...")
